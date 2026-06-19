@@ -1,0 +1,1 @@
+{bulkDeleting ? '삭제 중...' : `선택 삭제 (${selectedIds.size}개)`}
