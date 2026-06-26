@@ -16,21 +16,27 @@ model Purchase {
   source     String
   purpose    String?
   category   String      @default("ingredient")
+  unitType   String      @default("g")
+  unitAmount Float?
+  unitCount  Float?
   createdAt  DateTime    @default(now())
   ingredient Ingredient?
 }
 
 model Ingredient {
-  id           Int            @id @default(autoincrement())
-  name         String         @unique
-  purchaseId   Int            @unique
-  purchase     Purchase       @relation(fields: [purchaseId], references: [id])
-  totalGrams   Int
-  usedGrams    Int            @default(0)
-  expiryDate   DateTime?
-  storageNote  String?
-  usageHistory UsageHistory[]
-  createdAt    DateTime       @default(now())
+  id             Int            @id @default(autoincrement())
+  name           String
+  purchaseId     Int            @unique
+  purchase       Purchase       @relation(fields: [purchaseId], references: [id])
+  totalGrams     Int
+  usedGrams      Int            @default(0)
+  expiryDate     DateTime?
+  storageNote    String?
+  isAlertEnabled Boolean        @default(false)
+  usageHistory   UsageHistory[]
+  createdAt      DateTime       @default(now())
+
+  @@index([name])
 }
 
 model UsageHistory {

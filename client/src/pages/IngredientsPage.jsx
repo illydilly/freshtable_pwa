@@ -1,17 +1,17 @@
 import { useEffect, useMemo, useState } from 'react';
-import { CalendarDays, CheckCircle, Edit2, Plus, ShoppingBag, Trash2 } from 'lucide-react';
+import { Bell, BellOff, CalendarDays, CheckCircle, Edit2, Plus, RotateCcw, ShoppingBag, Trash2 } from 'lucide-react';
 import { api } from '../lib/api';
 import { PageHeader } from '../components/PageHeader';
 import { Modal } from '../components/Modal';
+import { UnitInput, emptyUnitValue } from '../components/UnitInput';
 import { formatCurrency, formatDate, getStatusTone } from '../lib/utils';
 
 const filters = ['전체', '신선', '빨리 먹기', '긴급'];
 const mealTypes = ['아침', '점심', '저녁', '간식'];
 const today = () => new Date().toISOString().slice(0, 10);
-const emptyPurchase = { itemName: '', price: '', grams: '', source: '', date: today() };
+const emptyPurchase = { itemName: '', price: '', source: '', date: today(), ...emptyUnitValue() };
 
-// ── #1: 클라이언트에서 항상 purchase.grams 기준으로 계산 ──────────────
-// ingredient.totalGrams는 DB 동기화 지연이 있을 수 있으므로 purchase.grams를 SSoT로 사용
+// ── 클라이언트에서 항상 purchase.grams 기준으로 계산 (SSoT) ──────────────
 function getClientTotal(item) {
   return item?.purchase?.grams ?? item?.totalGrams ?? 0;
 }
@@ -57,7 +57,7 @@ export function IngredientsPage() {
   const [savingUsage, setSavingUsage] = useState(false);
   const [savingExpiry, setSavingExpiry] = useState(false);
   const [savingIngredientInfo, setSavingIngredientInfo] = useState(false);
-  const [consumingId, setConsumingId] = useState(null); // #4
+  const [consumingId, setConsumingId] = useState(null);
 
   const [usageForm, setUsageForm] = useState({ date: today(), menuName: '', gramsUsed: '', mealType: '', useRecipe: false, recipeId: '' });
   const [editUsageForm, setEditUsageForm] = useState({ id: null, date: today(), menuName: '', gramsUsed: '', mealType: '' });
@@ -67,12 +67,29 @@ export function IngredientsPage() {
   const [editIngredientForm, setEditIngredientForm] = useState({ name: '', purpose: '' });
   const [editIngredientId, setEditIngredientId] = useState(null);
 
+  // ════════════════════════════════════════════════════════════════
+  // 기능 1: 소진 식재료 보조 뷰 + 재구매
+  // ════════════════════════════════════════════════════════════════
+  const [showConsumedView, setShowConsumedView] = useState(false);
+  const [consumedItems, setConsumedItems] = useState([]);
+  const [loadingConsumed, setLoadingConsumed] = useState(false);
+  const [repurchaseModal, setRepurchaseModal] = useState(null); // 재구매 대상 (소진된 원본 item)
+  const [repurchaseForm, setRepurchaseForm] = useState({ ...emptyUnitValue(), price: '', expiryDate: '' });
+  const [savingRepurchase, setSavingRepurchase] = useState(false);
+
   const loadIngredients = async (targetFilter = filter, preferredId = selected?.id) => {
     const res = await api.get('/ingredients', { params: targetFilter === '전체' ? {} : { status: targetFilter } });
     setItems(res.data);
     const nextId = preferredId && res.data.some(i => i.id === preferredId) ? preferredId : res.data[0]?.id;
     if (nextId) { const detail = await api.get(`/ingredients/${nextId}`); setSelected(detail.data); }
     else setSelected(null);
+  };
+
+  // 기능 1: 소진된 식재료 목록 로드 (보조 뷰)
+  const loadConsumed = async () => {
+    setLoadingConsumed(true);
+    try { const res = await api.get('/ingredients/consumed'); setConsumedItems(res.data); }
+    finally { setLoadingConsumed(false); }
   };
 
   useEffect(() => {
@@ -83,17 +100,16 @@ export function IngredientsPage() {
   const counts = useMemo(() => {
     const map = { 전체: 0, 신선: 0, '빨리 먹기': 0, 긴급: 0 };
     items.forEach(item => {
-      if (getClientRemaining(item) <= 0) return; // 소진된 재료는 카운트 제외
+      if (getClientRemaining(item) <= 0) return;
       map['전체']++;
       map[item.status] = (map[item.status] || 0) + 1;
     });
     return map;
   }, [items]);
 
-  // #1: 클라이언트 remaining 기준으로 필터 + 유통기한 짧은 순 정렬
   const sortedItems = useMemo(() => {
     return [...items]
-      .filter(item => getClientRemaining(item) > 0) // #3: 소진된 재료 자동 숨김
+      .filter(item => getClientRemaining(item) > 0)
       .sort((a, b) => {
         const da = a.expiryInfo?.daysUntil ?? 9999;
         const db = b.expiryInfo?.daysUntil ?? 9999;
@@ -110,7 +126,14 @@ export function IngredientsPage() {
   };
   const changeFilter = async entry => { setFilter(entry); await loadIngredients(entry); };
 
-  // ── #4: 소진완료 버튼 ──────────────────────────────────────────────
+  // 기능 1: 소진 뷰 토글 — 처음 열 때만 로드
+  const toggleConsumedView = () => {
+    const next = !showConsumedView;
+    setShowConsumedView(next);
+    if (next && consumedItems.length === 0) loadConsumed();
+  };
+
+  // ── 소진완료 버튼 (기존 기능 유지) ──────────────────────────────────
   const consumeIngredient = async (item, e) => {
     e.stopPropagation();
     const remaining = getClientRemaining(item);
@@ -118,18 +141,51 @@ export function IngredientsPage() {
     if (!confirm(`'${item.name}' ${remaining}g를 소진 완료 처리할까요?`)) return;
     setConsumingId(item.id);
     try {
-      await api.post(`/ingredients/${item.id}/usage`, {
-        date: today(),
-        menuName: '소진완료',
-        gramsUsed: remaining,
-        mealType: null
-      });
+      await api.post(`/ingredients/${item.id}/usage`, { date: today(), menuName: '소진완료', gramsUsed: remaining, mealType: null });
       if (selected?.id === item.id) setSelected(null);
       await loadIngredients(filter);
+      if (showConsumedView) await loadConsumed(); // 방금 소진된 항목이 보조 뷰에 즉시 보이도록 갱신
     } finally { setConsumingId(null); }
   };
 
-  // ── 사용내역 ──────────────────────────────────────────────────────
+  // ════════════════════════════════════════════════════════════════
+  // 기능 1: 재구매 — 기존 데이터를 Initial Value로 복사해 Form 오픈
+  // ════════════════════════════════════════════════════════════════
+  const openRepurchase = (item) => {
+    setRepurchaseModal(item);
+    // 기존 구매의 단위 정보를 그대로 이어받아 Initial Value로 설정
+    // (이름/구매처/용도는 서버가 자동으로 복사하므로 클라이언트는 수량/단위/유통기한만 입력받음)
+    setRepurchaseForm({
+      unitType: item.purchase?.unitType || 'g',
+      grams: '',
+      unitAmount: item.purchase?.unitType === 'count' ? String(item.purchase.unitAmount || '') : '',
+      unitCount: '',
+      price: '',
+      expiryDate: '',
+    });
+  };
+
+  const submitRepurchase = async (e) => {
+    e.preventDefault();
+    if (!repurchaseModal) return;
+    setSavingRepurchase(true);
+    try {
+      await api.post(`/ingredients/${repurchaseModal.id}/repurchase`, {
+        unitType: repurchaseForm.unitType,
+        grams: repurchaseForm.grams || undefined,
+        unitAmount: repurchaseForm.unitAmount || undefined,
+        unitCount: repurchaseForm.unitCount || undefined,
+        price: Number(repurchaseForm.price) || 0,
+        expiryDate: repurchaseForm.expiryDate || null,
+        date: today(),
+      });
+      setRepurchaseModal(null);
+      await loadConsumed();      // 소진 목록에서 갱신 (방금 재구매한 건 active가 됐으니 사라짐)
+      await loadIngredients(filter); // 메인 인벤토리에도 새 배치가 보이도록 갱신
+    } finally { setSavingRepurchase(false); }
+  };
+
+  // ── 사용내역 (기존 기능 유지) ─────────────────────────────────────
   const openUsageModal = () => {
     setUsageForm({ date: today(), menuName: '', gramsUsed: '', mealType: '', useRecipe: false, recipeId: '' });
     setUsageModal(true);
@@ -172,7 +228,7 @@ export function IngredientsPage() {
     await loadIngredients(filter, selected.id);
   };
 
-  // ── 구매/편집 ─────────────────────────────────────────────────────
+  // ── 구매/편집 (기존 기능 유지) ────────────────────────────────────
   const openEditPurchase = () => {
     const p = selected?.purchase; if (!p) return;
     setEditPurchaseForm({ _id: p.id, itemName: p.itemName, price: String(p.price), grams: String(p.grams), source: p.source, date: new Date(p.date).toISOString().slice(0, 10) });
@@ -203,10 +259,22 @@ export function IngredientsPage() {
     } finally { setSavingExpiry(false); }
   };
 
+  // 기능 3: 새 구매 등록 — unitType에 맞게 payload 구성
   const submitPurchase = async e => {
     e.preventDefault(); setSavingPurchase(true);
     try {
-      await api.post('/purchases/bulk', { items: [{ itemName: purchaseForm.itemName.trim(), price: Number(purchaseForm.price) || 0, grams: Number(purchaseForm.grams) || 0, source: purchaseForm.source.trim(), date: purchaseForm.date }] });
+      await api.post('/purchases/bulk', {
+        items: [{
+          itemName: purchaseForm.itemName.trim(),
+          price: Number(purchaseForm.price) || 0,
+          source: purchaseForm.source.trim(),
+          date: purchaseForm.date,
+          unitType: purchaseForm.unitType,
+          grams: purchaseForm.grams || undefined,
+          unitAmount: purchaseForm.unitAmount || undefined,
+          unitCount: purchaseForm.unitCount || undefined,
+        }]
+      });
       setPurchaseModal(false); setPurchaseForm(emptyPurchase); await loadIngredients(filter);
     } finally { setSavingPurchase(false); }
   };
@@ -232,7 +300,15 @@ export function IngredientsPage() {
     await loadIngredients(filter);
   };
 
-  // ── 선택된 재료의 클라이언트 계산값 ────────────────────────────────
+  // ════════════════════════════════════════════════════════════════
+  // 기능 2: 재고 부족 알림(isAlertEnabled) 토글
+  // ════════════════════════════════════════════════════════════════
+  const toggleAlert = async (item, e) => {
+    e.stopPropagation();
+    await api.patch(`/ingredients/${item.id}/info`, { isAlertEnabled: !item.isAlertEnabled });
+    await loadIngredients(filter, selected?.id);
+  };
+
   const selTotal = selected ? getClientTotal(selected) : 0;
   const selUsed = selected ? getClientUsed(selected) : 0;
   const selRemaining = Math.max(selTotal - selUsed, 0);
@@ -242,12 +318,54 @@ export function IngredientsPage() {
       <PageHeader title="식재료 인벤토리"
         subtitle="구매 기록과 사용 내역을 연결해 남은 재고를 정확하게 추적해요."
         action={
-          <button type="button" onClick={() => setPurchaseModal(true)}
-            className="inline-flex items-center gap-2 rounded-2xl bg-sage px-5 py-3 font-semibold text-white shadow-sm">
-            <ShoppingBag size={18} /> 새 구매 등록
-          </button>
+          <div className="flex items-center gap-2">
+            {/* 기능 1: 소진 식재료 보조 뷰 토글 */}
+            <button type="button" onClick={toggleConsumedView}
+              className={`inline-flex items-center gap-2 rounded-2xl px-4 py-3 font-semibold transition-colors ${showConsumedView ? 'bg-slate-800 text-white' : 'bg-slate-100 text-slate-600 hover:bg-slate-200'}`}>
+              <RotateCcw size={16} /> 소진 목록 {consumedCount > 0 && `(${consumedCount})`}
+            </button>
+            <button type="button" onClick={() => setPurchaseModal(true)}
+              className="inline-flex items-center gap-2 rounded-2xl bg-sage px-5 py-3 font-semibold text-white shadow-sm">
+              <ShoppingBag size={18} /> 새 구매 등록
+            </button>
+          </div>
         }
       />
+
+      {/* ════════════════════════════════════════════════════════════
+          기능 1: 소진 식재료 보조 뷰 — 재구매 버튼 포함
+          ════════════════════════════════════════════════════════════ */}
+      {showConsumedView && (
+        <section className="soft-card mb-5 p-6">
+          <div className="mb-4 flex items-center justify-between">
+            <h2 className="text-lg font-bold text-slate-900">🗑️ 소진된 식재료</h2>
+            <span className="text-xs text-slate-400">재구매 버튼을 누르면 기존 정보를 그대로 불러와 새로 등록할 수 있어요.</span>
+          </div>
+          {loadingConsumed ? (
+            <div className="py-6 text-center text-sm text-slate-400">불러오는 중...</div>
+          ) : consumedItems.length === 0 ? (
+            <div className="rounded-2xl bg-[#FCFCFC] py-8 text-center text-sm text-slate-400">소진된 식재료가 없어요.</div>
+          ) : (
+            <div className="grid gap-3 sm:grid-cols-2">
+              {consumedItems.map(item => (
+                <div key={item.id} className="flex items-center justify-between gap-3 rounded-2xl border border-border bg-[#FCFCFC] px-4 py-3">
+                  <div className="min-w-0">
+                    <div className="font-semibold text-slate-700 truncate">{item.name}</div>
+                    <div className="text-xs text-slate-400 mt-0.5">
+                      마지막 구매 {formatDate(item.purchase?.date)} · {item.purchase?.grams}g
+                    </div>
+                  </div>
+                  <button type="button" onClick={() => openRepurchase(item)}
+                    className="flex shrink-0 items-center gap-1.5 rounded-xl bg-sage px-3 py-2 text-xs font-bold text-white hover:bg-opacity-90 transition-colors">
+                    <RotateCcw size={13} /> 재구매
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
+        </section>
+      )}
+
       <div className="grid gap-5 xl:grid-cols-[1fr,400px]">
 
         {/* ── 재료 목록 ── */}
@@ -264,7 +382,7 @@ export function IngredientsPage() {
           {consumedCount > 0 && (
             <div className="mb-3 flex items-center gap-2 rounded-2xl bg-slate-50 px-4 py-2.5 text-xs text-slate-400">
               <CheckCircle size={13} />
-              <span>소진된 재료 <strong className="text-slate-600">{consumedCount}개</strong>가 목록에서 자동으로 숨겨졌습니다.</span>
+              <span>소진된 재료 <strong className="text-slate-600">{consumedCount}개</strong>가 목록에서 자동으로 숨겨졌습니다. (상단 '소진 목록' 버튼에서 재구매 가능)</span>
             </div>
           )}
 
@@ -280,11 +398,17 @@ export function IngredientsPage() {
                     <div className="flex flex-wrap items-center justify-between gap-3">
                       <div>
                         <div className="text-lg font-bold text-slate-900">{item.name}</div>
-                        {/* #1: 클라이언트 계산값으로 표시 */}
                         <div className="mt-1 text-sm text-slate-500">남은 재고 <strong>{remaining}g</strong></div>
                       </div>
                       <div className="flex items-center gap-2">
-                        {/* #4: 소진완료 버튼 — 노란 네모 위치 */}
+                        <button
+                          type="button"
+                          onClick={e => toggleAlert(item, e)}
+                          title={item.isAlertEnabled ? '재고 부족 알림 켜짐 — 클릭해서 끄기' : '재고 부족 알림 꺼짐 — 클릭해서 켜기'}
+                          className={`flex h-7 w-7 items-center justify-center rounded-full transition-all ${item.isAlertEnabled ? 'bg-amber-100 text-amber-500 hover:bg-amber-200' : 'bg-slate-100 text-slate-300 hover:bg-slate-200 hover:text-slate-500'}`}
+                        >
+                          {item.isAlertEnabled ? <Bell size={13} /> : <BellOff size={13} />}
+                        </button>
                         <button
                           type="button"
                           onClick={e => consumeIngredient(item, e)}
@@ -338,7 +462,17 @@ export function IngredientsPage() {
                 </div>
               </div>
 
-              {/* #1: 구매 정보 — purchase.grams 기준으로 직접 계산 */}
+              <button type="button" onClick={e => toggleAlert(selected, e)}
+                className={`mt-3 flex w-full items-center justify-between rounded-2xl border px-4 py-3 text-sm transition-colors ${selected.isAlertEnabled ? 'border-amber-200 bg-amber-50 text-amber-700' : 'border-border bg-[#FCFCFC] text-slate-500 hover:border-amber-200'}`}>
+                <span className="flex items-center gap-2 font-semibold">
+                  {selected.isAlertEnabled ? <Bell size={15} /> : <BellOff size={15} />}
+                  재고 부족 시 장보기 자동 추천
+                </span>
+                <span className={`rounded-full px-3 py-1 text-xs font-bold ${selected.isAlertEnabled ? 'bg-amber-400 text-white' : 'bg-slate-200 text-slate-500'}`}>
+                  {selected.isAlertEnabled ? 'ON' : 'OFF'}
+                </span>
+              </button>
+
               {selected.purchase && (
                 <div className="mt-4 rounded-2xl border border-border bg-[#FCFCFC] p-4">
                   <div className="flex items-center justify-between mb-2">
@@ -352,10 +486,12 @@ export function IngredientsPage() {
                     <div className="flex justify-between"><span className="text-slate-400">구매일</span><span>{formatDate(selected.purchase.date)}</span></div>
                     <div className="flex justify-between"><span className="text-slate-400">구매처</span><span>{selected.purchase.source}</span></div>
                     <div className="flex justify-between"><span className="text-slate-400">가격</span><span className="font-semibold">{formatCurrency(selected.purchase.price)}</span></div>
-                    {/* 총 구매량 = purchase.grams (항상 최신) */}
+                    {/* 기능 3: 입력 단위 정보도 함께 표시 */}
+                    {selected.purchase.unitType === 'count' && (
+                      <div className="flex justify-between"><span className="text-slate-400">입력 단위</span><span>{selected.purchase.unitAmount}g × {selected.purchase.unitCount}개</span></div>
+                    )}
                     <div className="flex justify-between"><span className="text-slate-400">총 구매량</span><span>{selTotal}g</span></div>
                     <div className="flex justify-between"><span className="text-slate-400">총 사용량</span><span>{selUsed}g</span></div>
-                    {/* 남은 재고 = 총 구매량 - 총 사용량 (클라이언트 직접 계산) */}
                     <div className="flex justify-between border-t border-border mt-1 pt-1">
                       <span className="font-semibold text-slate-600">남은 재고</span>
                       <span className="font-bold text-sage">{selRemaining}g</span>
@@ -419,20 +555,52 @@ export function IngredientsPage() {
         </section>
       </div>
 
-      {/* 새 구매 등록 */}
+      {/* 새 구매 등록 — 기능 3: 단위 선택 적용 */}
       <Modal open={purchaseModal} onClose={() => setPurchaseModal(false)} title="새 구매 등록" className="max-w-xl">
         <form onSubmit={submitPurchase} className="space-y-4">
           <input required className="input-base" placeholder="식재료 이름" value={purchaseForm.itemName} onChange={e => setPurchaseForm(p => ({ ...p, itemName: e.target.value }))} />
-          <div className="grid gap-3 sm:grid-cols-2">
-            <input required className="input-base" type="number" min="0" step="0.01" placeholder="가격" value={purchaseForm.price} onChange={e => setPurchaseForm(p => ({ ...p, price: e.target.value }))} />
-            <input required className="input-base" type="number" min="1" step="0.01" placeholder="그램 수" value={purchaseForm.grams} onChange={e => setPurchaseForm(p => ({ ...p, grams: e.target.value }))} />
-          </div>
+          <input required className="input-base" type="number" min="0" step="0.01" placeholder="가격" value={purchaseForm.price} onChange={e => setPurchaseForm(p => ({ ...p, price: e.target.value }))} />
+          {/* 기능 3: 단위 선택 컴포넌트 */}
+          <UnitInput value={purchaseForm} onChange={(next) => setPurchaseForm(p => ({ ...p, ...next }))} />
           <input required className="input-base" placeholder="구매처" value={purchaseForm.source} onChange={e => setPurchaseForm(p => ({ ...p, source: e.target.value }))} />
           <input required type="date" className="input-base" value={purchaseForm.date} onChange={e => setPurchaseForm(p => ({ ...p, date: e.target.value }))} />
           <button disabled={savingPurchase} className="w-full rounded-2xl bg-sage px-5 py-3 font-semibold text-white disabled:opacity-60">
             {savingPurchase ? '저장 중...' : '구매 저장'}
           </button>
         </form>
+      </Modal>
+
+      {/* ════════════════════════════════════════════════════════════
+          기능 1: 재구매 Form — 기존 데이터가 Initial Value로 채워짐
+          ════════════════════════════════════════════════════════════ */}
+      <Modal open={!!repurchaseModal} onClose={() => setRepurchaseModal(null)} title={`${repurchaseModal?.name || ''} 재구매`} className="max-w-xl">
+        {repurchaseModal && (
+          <form onSubmit={submitRepurchase} className="space-y-4">
+            {/* 이전 구매 정보 요약 (읽기 전용 — 이름/용도/구매처는 자동 복사됨을 안내) */}
+            <div className="rounded-2xl bg-[#F4F8F1] p-4 text-sm text-slate-600">
+              <div className="font-bold text-slate-900 mb-1">{repurchaseModal.name}</div>
+              <div className="text-xs text-slate-500">
+                이전 구매처 <strong>{repurchaseModal.purchase?.source}</strong>
+                {repurchaseModal.purchase?.purpose && <> · 용도 <strong>{repurchaseModal.purchase.purpose}</strong></>}
+                {' '}— 그대로 복사되어 새 항목에 적용됩니다.
+              </div>
+            </div>
+
+            <input className="input-base" type="number" min="0" step="0.01" placeholder="가격 (선택)" value={repurchaseForm.price} onChange={e => setRepurchaseForm(p => ({ ...p, price: e.target.value }))} />
+
+            {/* 기능 3: 단위 선택 (이전 구매의 unitType을 Initial Value로 이어받음) */}
+            <UnitInput value={repurchaseForm} onChange={(next) => setRepurchaseForm(p => ({ ...p, ...next }))} />
+
+            <div>
+              <label className="mb-1 block text-xs font-bold text-slate-500">새로운 유통기한</label>
+              <input type="date" className="input-base" value={repurchaseForm.expiryDate} onChange={e => setRepurchaseForm(p => ({ ...p, expiryDate: e.target.value }))} />
+            </div>
+
+            <button disabled={savingRepurchase} className="w-full rounded-2xl bg-sage px-5 py-3 font-semibold text-white disabled:opacity-60">
+              {savingRepurchase ? '등록 중...' : '재구매 등록'}
+            </button>
+          </form>
+        )}
       </Modal>
 
       {/* 사용 내역 추가 */}
