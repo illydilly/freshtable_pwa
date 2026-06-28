@@ -116,7 +116,7 @@ export function MealDiaryPage() {
   const [mealItems, setMealItems] = useState([]);
   const [createRecipe, setCreateRecipe] = useState(false);
   const [savingEntry, setSavingEntry] = useState(false);
-  const [newIngredients, setNewIngredients] = useState([{ name:'', grams:'' }]);
+  const [newIngredients, setNewIngredients] = useState([{ name:'', grams:'', unitType:'g', unitAmount:'' }]);
   const [newSteps, setNewSteps] = useState(['']);
   const [newCookingTools, setNewCookingTools] = useState([]);
 
@@ -189,7 +189,7 @@ export function MealDiaryPage() {
     setRawPhotoSrc(null); setCropMode(false);
     setCreateRecipe(false);
     setMealItems(existing?.mealItems || []);
-    setNewIngredients([{name:'',grams:''}]); setNewSteps(['']); setNewCookingTools([]);
+    setNewIngredients([{name:'',grams:'',unitType:'g',unitAmount:''}]); setNewSteps(['']); setNewCookingTools([]);
     setMealCat(existing?.mealCategory || 'home-cooked');
     setSelectedDiningOut(null);
     setLoadingDining(true);
@@ -247,7 +247,13 @@ export function MealDiaryPage() {
           calories:Number(values.calories), carbs:Number(values.carbs), protein:Number(values.protein),
           fat:Number(values.fat), sodium:Number(values.sodium), sugar:Number(values.sugar),
           cookingTools:newCookingTools.filter(t=>t.trim()),
-          ingredients:newIngredients.filter(i=>i.name.trim()).map(i=>({name:i.name.trim(),grams:Number(i.grams)||0})),
+          ingredients:newIngredients.filter(i=>i.name.trim()).map(i=>{
+            const ut=i.unitType||'g';
+            let g=Number(i.grams)||0;
+            if(ut==='count') g=Math.round(g*(Number(i.unitAmount)||0)); // #4: 개수×개당g
+            if(ut==='kg')    g=Math.round(g*1000);                       // #4: kg→g
+            return {name:i.name.trim(),grams:g,unitType:ut,unitAmount:Number(i.unitAmount)||undefined};
+          }),
           steps:newSteps.filter(s=>s.trim()), eatenDates:[values.date]
         }));
       }
@@ -569,10 +575,44 @@ export function MealDiaryPage() {
                 <div>
                   <div className="mb-2 flex items-center justify-between"><label className="text-xs font-bold text-slate-500">사용 재료</label><button type="button" onClick={()=>setNewIngredients(p=>[...p,{name:'',grams:''}])} className="rounded-lg bg-[#EDF7E7] px-2.5 py-1 text-xs font-semibold text-sage">+ 재료</button></div>
                   {newIngredients.map((ing,i)=>(
-                    <div key={i} className="mb-2 flex gap-2 items-center">
-                      <input className="input-base flex-1 text-sm" placeholder="재료명" value={ing.name} onChange={e=>setNewIngredients(p=>p.map((x,idx)=>idx===i?{...x,name:e.target.value}:x))}/>
-                      <input className="input-base w-20 text-sm" placeholder="g" type="number" step="0.01" value={ing.grams} onChange={e=>setNewIngredients(p=>p.map((x,idx)=>idx===i?{...x,grams:e.target.value}:x))}/>
-                      {newIngredients.length>1&&<button type="button" onClick={()=>setNewIngredients(p=>p.filter((_,idx)=>idx!==i))} className="flex h-9 w-9 items-center justify-center rounded-xl bg-[#FFF0F0] text-coral"><X size={13}/></button>}
+                    <div key={i} className="mb-2 space-y-1.5">
+                      <div className="flex gap-2 items-center">
+                        {/* 재료명 */}
+                        <input className="input-base flex-1 text-sm" placeholder="재료명" value={ing.name}
+                          onChange={e=>setNewIngredients(p=>p.map((x,idx)=>idx===i?{...x,name:e.target.value}:x))}/>
+                        {/* #4 Fix: 단위 선택 */}
+                        <select className="input-base w-20 text-xs px-1" value={ing.unitType||'g'}
+                          onChange={e=>setNewIngredients(p=>p.map((x,idx)=>idx===i?{...x,unitType:e.target.value,grams:'',unitAmount:''}:x))}>
+                          <option value="g">g</option>
+                          <option value="ml">ml</option>
+                          <option value="kg">kg</option>
+                          <option value="count">개</option>
+                        </select>
+                        {newIngredients.length>1&&<button type="button" onClick={()=>setNewIngredients(p=>p.filter((_,idx)=>idx!==i))} className="flex h-9 w-9 items-center justify-center rounded-xl bg-[#FFF0F0] text-coral"><X size={13}/></button>}
+                      </div>
+                      {/* #4 Fix: count 모드 — 개수 + 개당 용량 */}
+                      {ing.unitType==='count' ? (
+                        <div className="flex gap-2">
+                          <div className="flex-1">
+                            <input className="input-base text-sm" type="number" min="0.01" step="1"
+                              placeholder="개수" value={ing.grams}
+                              onChange={e=>setNewIngredients(p=>p.map((x,idx)=>idx===i?{...x,grams:e.target.value}:x))}/>
+                          </div>
+                          <div className="flex-1">
+                            <input className="input-base text-sm" type="number" min="0.01" step="0.1"
+                              placeholder="개당(g)" value={ing.unitAmount}
+                              onChange={e=>setNewIngredients(p=>p.map((x,idx)=>idx===i?{...x,unitAmount:e.target.value}:x))}/>
+                          </div>
+                          {ing.grams&&ing.unitAmount&&<span className="text-xs text-sage self-center whitespace-nowrap">
+                            ={Math.round(Number(ing.grams)*Number(ing.unitAmount))}g
+                          </span>}
+                        </div>
+                      ) : (
+                        <input className="input-base text-sm" type="number" min="0.01" step="0.01"
+                          placeholder={ing.unitType==='ml'?'ml':ing.unitType==='kg'?'kg':'g'}
+                          value={ing.grams}
+                          onChange={e=>setNewIngredients(p=>p.map((x,idx)=>idx===i?{...x,grams:e.target.value}:x))}/>
+                      )}
                     </div>
                   ))}
                 </div>

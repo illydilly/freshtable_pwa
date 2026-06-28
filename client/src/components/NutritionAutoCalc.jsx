@@ -1,27 +1,76 @@
+// client/src/components/NutritionAutoCalc.jsx
 import { useState } from 'react';
-import { Loader2, Sparkles, RefreshCcw, CheckCircle, AlertCircle } from 'lucide-react';
+import { AlertCircle, CheckCircle, Loader2, RefreshCcw, Sparkles } from 'lucide-react';
 import { calculateNutrition, estimateWithAI } from '../lib/nutritionCalc';
 
 /**
+ * #4 Fix: 단위별 그램 환산 함수
+ * - count : 개당 용량(unitAmount) × 개수(grams) → g
+ * - kg    : grams × 1000 → g
+ * - ml    : 1ml ≈ 1g (영양DB는 대부분 100g 기준이므로 동일 취급)
+ * - g     : 그대로
+ */
+function resolveGramsForCalc(ing) {
+  const unitType  = ing.unitType  || 'g';
+  const rawVal    = Number(ing.grams)      || 0;
+  const perUnit   = Number(ing.unitAmount) || 0;
+
+  if (unitType === 'count') {
+    // rawVal = 개수, perUnit = 개당 용량(g)
+    const total = rawVal * perUnit;
+    if (total <= 0 && perUnit <= 0) {
+      console.warn(`[NutritionAutoCalc] "${ing.name}" count 모드인데 unitAmount 미설정. 기본 60g 사용.`);
+      return rawVal * 60; // 계란 기본값 fallback
+    }
+    return total;
+  }
+  if (unitType === 'kg') return rawVal * 1000;
+  // g, ml → 동일 취급
+  return rawVal;
+}
+
+/** 단위 표기 헬퍼 */
+function displayUnit(ing) {
+  const ut = ing.unitType || 'g';
+  if (ut === 'count') return `${ing.grams || 0}개 × ${ing.unitAmount || '?'}g`;
+  if (ut === 'kg')   return `${ing.grams || 0}kg`;
+  return `${ing.grams || 0}${ut}`;
+}
+
+/**
  * 재사용 가능한 영양정보 자동 계산 컴포넌트
- * 사용법: <NutritionAutoCalc ingredients={[{name,grams}]} onResult={(nutrition)=>setForm(...)} />
+ * Props:
+ *   ingredients : [{name, grams, unitType?, unitAmount?}]  ← MealDiaryPage/RecipesPage 에서 전달
+ *   onResult    : ({calories, carbs, protein, fat, sodium, sugar}) => void
  */
 export function NutritionAutoCalc({ ingredients, onResult }) {
-  const [calculating, setCalculating] = useState(false);
-  const [estimating, setEstimating] = useState(false);
-  const [calcResult, setCalcResult] = useState(null);
-  const [error, setError] = useState('');
-  const [aiApplied, setAiApplied] = useState(false);
+  const [calculating, setCalculating]   = useState(false);
+  const [estimating,  setEstimating]    = useState(false);
+  const [calcResult,  setCalcResult]    = useState(null);
+  const [error,       setError]         = useState('');
+  const [aiApplied,   setAiApplied]     = useState(false);
 
-  const validCount = ingredients.filter(i => i.name?.trim() && Number(i.grams) > 0).length;
+  const validCount = ingredients.filter(
+    (i) => i.name?.trim() && (Number(i.grams) > 0)
+  ).length;
 
   const handleCalculate = async () => {
     if (validCount === 0) return;
     setCalculating(true); setError(''); setCalcResult(null); setAiApplied(false);
     try {
-      const result = await calculateNutrition(ingredients);
-      setCalcResult(result);
-      if (result && onResult) onResult(result.total);
+      // #4 Fix: 서버로 보내기 전에 모든 재료를 g 기준으로 환산
+      const resolved = ingredients
+        .filter((i) => i.name?.trim() && Number(i.grams) > 0)
+        .map((i) => ({
+          name:  i.name.trim(),
+          grams: resolveGramsForCalc(i),   // ← 핵심 변환
+          _orig: displayUnit(i),           // 표시용 원래 입력값
+        }));
+
+      const result = await calculateNutrition(resolved);
+      if (!result) return;
+      setCalcResult({ ...result, resolvedIngredients: resolved });
+      if (onResult) onResult(result.total);
     } catch (err) {
       setError(err.response?.data?.message || '계산 중 오류가 발생했습니다.');
     } finally { setCalculating(false); }
@@ -32,7 +81,6 @@ export function NutritionAutoCalc({ ingredients, onResult }) {
     setEstimating(true); setError('');
     try {
       const aiNutrition = await estimateWithAI(calcResult.missingIngredients);
-      // 기존 계산 결과 + AI 추정값 합산
       const merged = {
         calories: (calcResult.total.calories || 0) + (aiNutrition.calories || 0),
         carbs:    Math.round(((calcResult.total.carbs    || 0) + (aiNutrition.carbs    || 0)) * 100) / 100,
@@ -41,32 +89,28 @@ export function NutritionAutoCalc({ ingredients, onResult }) {
         sodium:   Math.round(((calcResult.total.sodium   || 0) + (aiNutrition.sodium   || 0)) * 100) / 100,
         sugar:    Math.round(((calcResult.total.sugar    || 0) + (aiNutrition.sugar    || 0)) * 100) / 100,
       };
-      setCalcResult(prev => ({ ...prev, total: merged, aiAdded: aiNutrition }));
+      setCalcResult((prev) => ({ ...prev, total: merged, aiAdded: aiNutrition }));
       setAiApplied(true);
       if (onResult) onResult(merged);
     } catch (err) {
-      setError(err.response?.data?.message || 'AI 추정 실패. ANTHROPIC_API_KEY가 서버에 설정돼 있는지 확인해 주세요.');
+      setError(err.response?.data?.message || 'AI 추정 실패. ANTHROPIC_API_KEY 서버 설정 확인.');
     } finally { setEstimating(false); }
   };
 
   return (
     <div className="rounded-2xl border border-border bg-[#F8FAF7] p-4 space-y-3">
-      {/* 헤더 + 계산 버튼 */}
+      {/* 헤더 */}
       <div className="flex items-center justify-between">
         <div className="text-sm font-bold text-slate-700">영양정보 자동 계산</div>
-        <button
-          type="button"
-          onClick={handleCalculate}
-          disabled={calculating || validCount === 0}
-          className="flex items-center gap-1.5 rounded-xl bg-sage px-3 py-2 text-xs font-semibold text-white hover:bg-opacity-90 disabled:opacity-50 transition-all"
-        >
+        <button type="button" onClick={handleCalculate} disabled={calculating || validCount === 0}
+          className="flex items-center gap-1.5 rounded-xl bg-sage px-3 py-2 text-xs font-semibold text-white hover:bg-opacity-90 disabled:opacity-50 transition-all">
           {calculating ? <Loader2 size={13} className="animate-spin" /> : <RefreshCcw size={13} />}
           {calculating ? '계산 중...' : `재료로 자동 계산 (${validCount}개)`}
         </button>
       </div>
 
       {validCount === 0 && (
-        <p className="text-xs text-slate-400">이름과 그램수가 입력된 재료가 있어야 계산할 수 있어요.</p>
+        <p className="text-xs text-slate-400">이름과 용량이 입력된 재료가 있어야 계산할 수 있어요.</p>
       )}
 
       {error && (
@@ -79,10 +123,19 @@ export function NutritionAutoCalc({ ingredients, onResult }) {
       {calcResult && (
         <div className="space-y-2">
           <div className="text-xs font-semibold text-slate-500">재료별 조회 결과</div>
-          <div className="space-y-1.5 max-h-40 overflow-y-auto">
-            {calcResult.perIngredient.map((r, i) => (
+          <div className="space-y-1.5 max-h-44 overflow-y-auto">
+            {calcResult.perIngredient?.map((r, i) => (
               <div key={i} className="flex items-center justify-between rounded-lg bg-white px-3 py-2 text-xs">
-                <span className="font-medium text-slate-700">{r.name} <span className="text-slate-400">{r.grams}g</span></span>
+                <span className="font-medium text-slate-700">
+                  {r.name}
+                  <span className="ml-1 text-slate-400">
+                    ({calcResult.resolvedIngredients?.[i]?._orig ?? `${r.grams}g`})
+                    {/* #4: 환산된 grams 도 병기 */}
+                    {calcResult.resolvedIngredients?.[i] && calcResult.resolvedIngredients[i].grams !== Number((r.grams+'').replace('g','')) &&
+                      <span className="ml-1 text-amber-500">→ {r.grams}g</span>
+                    }
+                  </span>
+                </span>
                 {r.found ? (
                   <span className="flex items-center gap-1 rounded-full bg-[#EDF7E7] px-2 py-0.5 font-semibold text-sage">
                     <CheckCircle size={10} />
@@ -96,7 +149,7 @@ export function NutritionAutoCalc({ ingredients, onResult }) {
             ))}
           </div>
 
-          {/* 합계 표시 */}
+          {/* 합계 */}
           <div className="rounded-xl bg-sage/10 border border-sage/20 px-3 py-2.5">
             <div className="flex items-center justify-between">
               <span className="text-xs font-bold text-sage">
@@ -116,22 +169,16 @@ export function NutritionAutoCalc({ ingredients, onResult }) {
             )}
           </div>
 
-          {/* AI 추정 버튼 — 미확인 재료 있을 때만 */}
+          {/* AI 추정 버튼 */}
           {calcResult.missingCount > 0 && !aiApplied && (
-            <button
-              type="button"
-              onClick={handleAIEstimate}
-              disabled={estimating}
-              className="flex w-full items-center justify-center gap-2 rounded-xl bg-gradient-to-r from-purple-50 to-blue-50 border border-purple-200 py-2.5 text-xs font-semibold text-purple-700 hover:from-purple-100 hover:to-blue-100 transition-all disabled:opacity-60"
-            >
+            <button type="button" onClick={handleAIEstimate} disabled={estimating}
+              className="flex w-full items-center justify-center gap-2 rounded-xl bg-gradient-to-r from-purple-50 to-blue-50 border border-purple-200 py-2.5 text-xs font-semibold text-purple-700 hover:from-purple-100 hover:to-blue-100 transition-all disabled:opacity-60">
               {estimating ? <Loader2 size={13} className="animate-spin" /> : <Sparkles size={13} />}
-              {estimating
-                ? 'AI가 추정 중...'
-                : `미확인 ${calcResult.missingCount}개 항목 AI(Claude)로 추정`}
+              {estimating ? 'AI가 추정 중...' : `미확인 ${calcResult.missingCount}개 항목 AI(Claude)로 추정`}
             </button>
           )}
           {calcResult.missingCount > 0 && !aiApplied && (
-            <p className="text-[10px] text-slate-400 text-center">AI 추정값은 참고용이며 실제와 다를 수 있습니다. 서버에 ANTHROPIC_API_KEY 필요.</p>
+            <p className="text-[10px] text-slate-400 text-center">AI 추정값은 참고용이며 실제와 다를 수 있어요. 서버에 ANTHROPIC_API_KEY 필요.</p>
           )}
         </div>
       )}

@@ -9,7 +9,17 @@ import { formatCurrency, formatDate, getStatusTone } from '../lib/utils';
 const filters = ['전체', '신선', '빨리 먹기', '긴급'];
 const mealTypes = ['아침', '점심', '저녁', '간식'];
 const today = () => new Date().toISOString().slice(0, 10);
-const emptyPurchase = { itemName: '', price: '', source: '', date: today(), ...emptyUnitValue() };
+const emptyPurchase = { itemName: '', price: '', source: '', date: today(), unitType: 'g', ...emptyUnitValue() };
+
+// ── #1 Fix: 단위 포맷 헬퍼 (ml / g 올바르게 표기) ──────────────────────
+function formatUnit(grams, unitType) {
+  if (unitType === 'ml') return `${grams}ml`;
+  if (unitType === 'kg') {
+    const kg = (grams / 1000).toFixed(2).replace(/\.00$/, '');
+    return `${kg}kg (${grams}g)`;
+  }
+  return `${grams}g`;
+}
 
 // ── 클라이언트에서 항상 purchase.grams 기준으로 계산 (SSoT) ──────────────
 function getClientTotal(item) {
@@ -64,7 +74,7 @@ export function IngredientsPage() {
   const [purchaseForm, setPurchaseForm] = useState(emptyPurchase);
   const [editPurchaseForm, setEditPurchaseForm] = useState({ ...emptyPurchase, _id: null });
   const [expiryForm, setExpiryForm] = useState({ expiryDate: '', storageNote: '' });
-  const [editIngredientForm, setEditIngredientForm] = useState({ name: '', purpose: '' });
+  const [editIngredientForm, setEditIngredientForm] = useState({ name: '', purpose: '', unitType: 'g', grams: '' });
   const [editIngredientId, setEditIngredientId] = useState(null);
 
   // ════════════════════════════════════════════════════════════════
@@ -130,7 +140,7 @@ export function IngredientsPage() {
   const toggleConsumedView = () => {
     const next = !showConsumedView;
     setShowConsumedView(next);
-    if (next && consumedItems.length === 0) loadConsumed();
+    if (next) loadConsumed(); // #2 Fix: 열 때마다 최신 데이터 재fetch
   };
 
   // ── 소진완료 버튼 (기존 기능 유지) ──────────────────────────────────
@@ -144,7 +154,7 @@ export function IngredientsPage() {
       await api.post(`/ingredients/${item.id}/usage`, { date: today(), menuName: '소진완료', gramsUsed: remaining, mealType: null });
       if (selected?.id === item.id) setSelected(null);
       await loadIngredients(filter);
-      if (showConsumedView) await loadConsumed(); // 방금 소진된 항목이 보조 뷰에 즉시 보이도록 갱신
+      await loadConsumed(); // #2 Fix: showConsumedView 여부와 관계없이 항상 재fetch
     } finally { setConsumingId(null); }
   };
 
@@ -231,16 +241,26 @@ export function IngredientsPage() {
   // ── 구매/편집 (기존 기능 유지) ────────────────────────────────────
   const openEditPurchase = () => {
     const p = selected?.purchase; if (!p) return;
-    setEditPurchaseForm({ _id: p.id, itemName: p.itemName, price: String(p.price), grams: String(p.grams), source: p.source, date: new Date(p.date).toISOString().slice(0, 10) });
+    setEditPurchaseForm({
+      _id: p.id, itemName: p.itemName, price: String(p.price),
+      grams: String(p.grams), source: p.source,
+      date: new Date(p.date).toISOString().slice(0, 10),
+      unitType: p.unitType || 'g', // #1 Fix: 현재 단위 포함
+    });
     setEditPurchaseModal(true);
   };
 
   const submitEditPurchase = async e => {
     e.preventDefault(); setSavingPurchase(true);
     try {
+      // #1 Fix: unitType도 함께 전송 → 서버(PUT /api/purchases/:id)가 Ingredient도 동기화
       await api.put(`/purchases/${editPurchaseForm._id}`, {
-        itemName: editPurchaseForm.itemName, price: Number(editPurchaseForm.price),
-        grams: Number(editPurchaseForm.grams), source: editPurchaseForm.source, date: editPurchaseForm.date
+        itemName: editPurchaseForm.itemName,
+        price:    Number(editPurchaseForm.price),
+        grams:    Number(editPurchaseForm.grams),
+        source:   editPurchaseForm.source,
+        date:     editPurchaseForm.date,
+        unitType: editPurchaseForm.unitType || 'g',
       });
       setEditPurchaseModal(false); await loadIngredients(filter, selected.id);
     } finally { setSavingPurchase(false); }
@@ -281,14 +301,24 @@ export function IngredientsPage() {
 
   const openEditIngredient = item => {
     setEditIngredientId(item.id);
-    setEditIngredientForm({ name: item.name, purpose: item.purchase?.purpose || '' });
+    setEditIngredientForm({
+      name: item.name,
+      purpose: item.purchase?.purpose || '',
+      unitType: item.purchase?.unitType || 'g',   // #3 Fix: 현재 단위
+      grams: String(item.purchase?.grams || ''),   // #3 Fix: 현재 총용량
+    });
     setEditIngredientModal(true);
   };
 
   const submitEditIngredient = async e => {
     e.preventDefault(); setSavingIngredientInfo(true);
     try {
-      await api.patch(`/ingredients/${editIngredientId}/info`, { name: editIngredientForm.name.trim(), purpose: editIngredientForm.purpose.trim() || null });
+      await api.patch(`/ingredients/${editIngredientId}/info`, {
+        name: editIngredientForm.name.trim(),
+        purpose: editIngredientForm.purpose.trim() || null,
+        grams: editIngredientForm.grams ? Number(editIngredientForm.grams) : undefined,   // #3
+        unitType: editIngredientForm.unitType || undefined,                                  // #3
+      });
       setEditIngredientModal(false); await loadIngredients(filter, editIngredientId);
     } finally { setSavingIngredientInfo(false); }
   };
@@ -352,7 +382,7 @@ export function IngredientsPage() {
                   <div className="min-w-0">
                     <div className="font-semibold text-slate-700 truncate">{item.name}</div>
                     <div className="text-xs text-slate-400 mt-0.5">
-                      마지막 구매 {formatDate(item.purchase?.date)} · {item.purchase?.grams}g
+                      마지막 구매 {formatDate(item.purchase?.date)} · {formatUnit(item.purchase?.grams ?? 0, item.purchase?.unitType)}
                     </div>
                   </div>
                   <button type="button" onClick={() => openRepurchase(item)}
@@ -490,11 +520,11 @@ export function IngredientsPage() {
                     {selected.purchase.unitType === 'count' && (
                       <div className="flex justify-between"><span className="text-slate-400">입력 단위</span><span>{selected.purchase.unitAmount}g × {selected.purchase.unitCount}개</span></div>
                     )}
-                    <div className="flex justify-between"><span className="text-slate-400">총 구매량</span><span>{selTotal}g</span></div>
+                    <div className="flex justify-between"><span className="text-slate-400">총 구매량</span><span>{formatUnit(selTotal, selected.purchase?.unitType)}</span></div>
                     <div className="flex justify-between"><span className="text-slate-400">총 사용량</span><span>{selUsed}g</span></div>
                     <div className="flex justify-between border-t border-border mt-1 pt-1">
                       <span className="font-semibold text-slate-600">남은 재고</span>
-                      <span className="font-bold text-sage">{selRemaining}g</span>
+                      <span className="font-bold text-sage">{formatUnit(selRemaining, selected.purchase?.unitType)}</span>
                     </div>
                     {selected.purchase.purpose && (
                       <div className="flex justify-between"><span className="text-slate-400">용도</span><span>{selected.purchase.purpose}</span></div>
@@ -676,7 +706,28 @@ export function IngredientsPage() {
           <div><label className="mb-1 block text-xs font-bold text-slate-500">식재료명</label><input className="input-base" value={editPurchaseForm.itemName} onChange={e => setEditPurchaseForm(p => ({ ...p, itemName: e.target.value }))} /></div>
           <div className="grid grid-cols-2 gap-3">
             <div><label className="mb-1 block text-xs font-bold text-slate-500">가격 (원)</label><input type="number" step="0.01" className="input-base" value={editPurchaseForm.price} onChange={e => setEditPurchaseForm(p => ({ ...p, price: e.target.value }))} /></div>
-            <div><label className="mb-1 block text-xs font-bold text-slate-500">용량 (g)</label><input type="number" step="0.01" className="input-base" value={editPurchaseForm.grams} onChange={e => setEditPurchaseForm(p => ({ ...p, grams: e.target.value }))} /></div>
+            {/* #1 Fix: 단위를 동적으로 선택 + 레이블 일치 */}
+            <div>
+              <label className="mb-1 block text-xs font-bold text-slate-500">
+                단위
+              </label>
+              <select className="input-base" value={editPurchaseForm.unitType || 'g'} onChange={e => setEditPurchaseForm(p => ({ ...p, unitType: e.target.value }))}>
+                <option value="g">g (그램)</option>
+                <option value="ml">ml (밀리리터)</option>
+                <option value="kg">kg (킬로그램)</option>
+                <option value="count">개수 기준</option>
+              </select>
+            </div>
+          </div>
+          <div>
+            <label className="mb-1 block text-xs font-bold text-slate-500">
+              {/* #1 Fix: 선택된 unitType에 맞게 레이블 동적 변경 */}
+              {editPurchaseForm.unitType === 'ml' ? '총 용량 (ml)' : editPurchaseForm.unitType === 'kg' ? '총 용량 (kg)' : editPurchaseForm.unitType === 'count' ? '총 용량 (g) — 개수×개당g 직접 입력' : '총 용량 (g)'}
+            </label>
+            <input type="number" step="0.01" className="input-base" value={editPurchaseForm.grams} onChange={e => setEditPurchaseForm(p => ({ ...p, grams: e.target.value }))} />
+            {editPurchaseForm.unitType === 'kg' && Number(editPurchaseForm.grams) > 0 && (
+              <p className="mt-1 text-xs text-sage">= {Math.round(Number(editPurchaseForm.grams) * 1000)}g 으로 저장됩니다</p>
+            )}
           </div>
           <div><label className="mb-1 block text-xs font-bold text-slate-500">구매처</label><input className="input-base" value={editPurchaseForm.source} onChange={e => setEditPurchaseForm(p => ({ ...p, source: e.target.value }))} /></div>
           <div><label className="mb-1 block text-xs font-bold text-slate-500">구매일</label><input type="date" className="input-base" value={editPurchaseForm.date} onChange={e => setEditPurchaseForm(p => ({ ...p, date: e.target.value }))} /></div>
@@ -704,6 +755,24 @@ export function IngredientsPage() {
         <form onSubmit={submitEditIngredient} className="space-y-4">
           <div><label className="mb-1.5 block text-sm font-semibold text-slate-700">식재료 이름</label><input required className="input-base" value={editIngredientForm.name} onChange={e => setEditIngredientForm(p => ({ ...p, name: e.target.value }))} /><p className="mt-1 text-xs text-slate-400">이름 변경 시 구매내역·장보기리스트도 자동 반영됩니다.</p></div>
           <div><label className="mb-1.5 block text-sm font-semibold text-slate-700">용도 (선택)</label><input className="input-base" value={editIngredientForm.purpose} onChange={e => setEditIngredientForm(p => ({ ...p, purpose: e.target.value }))} placeholder="예: 반찬용, 간식용" /></div>
+          {/* #3 Fix: 단위 및 총용량 수정 */}
+          <div className="grid grid-cols-2 gap-3">
+            <div>
+              <label className="mb-1.5 block text-sm font-semibold text-slate-700">단위</label>
+              <select className="input-base" value={editIngredientForm.unitType} onChange={e => setEditIngredientForm(p => ({ ...p, unitType: e.target.value }))}>
+                <option value="g">g (그램)</option>
+                <option value="ml">ml (밀리리터)</option>
+                <option value="count">개 (개수 기준)</option>
+              </select>
+            </div>
+            <div>
+              <label className="mb-1.5 block text-sm font-semibold text-slate-700">총 용량</label>
+              <input type="number" min="0.01" step="0.01" className="input-base"
+                placeholder={editIngredientForm.unitType === 'ml' ? 'ml' : 'g'}
+                value={editIngredientForm.grams}
+                onChange={e => setEditIngredientForm(p => ({ ...p, grams: e.target.value }))} />
+            </div>
+          </div>
           <div className="flex gap-3 pt-2">
             <button type="button" onClick={() => setEditIngredientModal(false)} className="flex-1 rounded-2xl border border-border px-5 py-3 font-semibold text-slate-500">취소</button>
             <button disabled={savingIngredientInfo} className="flex-1 rounded-2xl bg-sage px-5 py-3 font-semibold text-white disabled:opacity-60">{savingIngredientInfo ? '저장 중...' : '저장'}</button>

@@ -472,7 +472,7 @@ const purchaseItemSchema = z.object({
   price: z.coerce.number().int().nonnegative(),
   grams: z.coerce.number().int().nonnegative().default(0),
   source: z.string().min(1),
-  unitType: z.enum(['count', 'g', 'ml']).default('g'),
+  unitType: z.enum(['count', 'g', 'ml', 'kg']).default('g'),  // #3 kg 추가
   unitAmount: z.coerce.number().positive().optional(),
   unitCount: z.coerce.number().positive().optional(),
 });
@@ -631,17 +631,41 @@ app.get('/api/purchases/dining-out', async (req, res, next) => {
   } catch (error) { next(error); }
 });
 
-// 구매 내역 수정 (#1, #2)
+// 구매 내역 수정 — #1 Fix: unitType/kg 환산 + Ingredient 완전 동기화
 app.put('/api/purchases/:id', async (req, res, next) => {
   try {
     const id = Number(req.params.id);
     const payload = purchaseItemSchema.parse(req.body);
+
+    // #3 Fix: kg 단위를 grams 로 자동 환산
+    const resolvedGrams = resolveTotalGrams(payload);
+
     const purchase = await prisma.purchase.findUnique({ where: { id }, include: { ingredient: true } });
     if (!purchase) return res.status(404).json({ message: '구매 내역을 찾을 수 없습니다.' });
+
     const updated = await prisma.$transaction(async (tx) => {
-      const p = await tx.purchase.update({ where: { id }, data: { itemName: payload.itemName, price: payload.price, grams: payload.grams, source: payload.source, date: new Date(payload.date) } });
+      const p = await tx.purchase.update({
+        where: { id },
+        data: {
+          itemName:   payload.itemName,
+          price:      payload.price,
+          grams:      resolvedGrams,        // #3: 환산된 최종 grams
+          source:     payload.source,
+          date:       new Date(payload.date),
+          unitType:   payload.unitType  ?? 'g',
+          unitAmount: payload.unitAmount ?? null,
+          unitCount:  payload.unitCount  ?? null,
+        }
+      });
+      // #1 Fix: Ingredient.totalGrams & name 도 함께 동기화
       if (purchase.ingredient) {
-        await tx.ingredient.update({ where: { id: purchase.ingredient.id }, data: { name: payload.itemName, totalGrams: payload.grams } });
+        await tx.ingredient.update({
+          where: { id: purchase.ingredient.id },
+          data: {
+            name:       payload.itemName,
+            totalGrams: resolvedGrams,  // purchase.grams 와 항상 일치하도록
+          }
+        });
       }
       return p;
     });
@@ -1604,7 +1628,7 @@ app.delete('/api/ingredients/:id', async (req, res, next) => {
 app.patch('/api/ingredients/:id/info', async (req, res, next) => {
   try {
     const id = Number(req.params.id);
-    const { name, purpose, isAlertEnabled } = req.body;
+    const { name, purpose, isAlertEnabled, grams, unitType } = req.body;
     const ingredient = await prisma.ingredient.findUnique({ where: { id }, include: { purchase: true } });
     if (!ingredient) return res.status(404).json({ message: '식재료를 찾을 수 없습니다.' });
     await prisma.$transaction(async (tx) => {
@@ -1618,6 +1642,16 @@ app.patch('/api/ingredients/:id/info', async (req, res, next) => {
       }
       if (isAlertEnabled !== undefined) {
         await tx.ingredient.update({ where: { id }, data: { isAlertEnabled: Boolean(isAlertEnabled) } });
+      }
+      // #3: 단위/총용량 수정 — 연결된 Purchase와 Ingredient 동시 업데이트
+      const purchaseUpdate = {};
+      if (grams !== undefined) purchaseUpdate.grams = Number(grams);
+      if (unitType !== undefined) purchaseUpdate.unitType = unitType;
+      if (Object.keys(purchaseUpdate).length > 0) {
+        await tx.purchase.update({ where: { id: ingredient.purchaseId }, data: purchaseUpdate });
+        if (grams !== undefined) {
+          await tx.ingredient.update({ where: { id }, data: { totalGrams: Number(grams) } });
+        }
       }
     });
     await syncShoppingList();
@@ -1652,7 +1686,7 @@ app.get('/api/ingredients/consumed', async (_req, res, next) => {
 // 추가로 보내면 된다. 이 엔드포인트는 항상 새로운 Purchase + Ingredient row를
 // 생성하므로, 기존 소진된 row는 절대 수정되거나 삭제되지 않고 이력으로 보존된다.
 const repurchaseSchema = z.object({
-  unitType: z.enum(['count', 'g', 'ml']).default('g'),
+  unitType: z.enum(['count', 'g', 'ml', 'kg']).default('g'),  // #3 kg 추가
   grams: z.coerce.number().nonnegative().optional(),     // g/ml 직접 입력 시
   unitAmount: z.coerce.number().positive().optional(),    // count: 개당 용량
   unitCount: z.coerce.number().positive().optional(),     // count: 구매 개수
@@ -1763,34 +1797,48 @@ app.post('/api/recommendations/by-ingredients', async (req, res, next) => {
     const { selectedIngredients = [], selectedTools = [], keyword = '' } = req.body;
     const savedRecipes = await prisma.recipe.findMany();
 
-    // #4: 키워드 직접 입력 없이도 선택한 식재료명으로 공공 레시피 자동 검색
+    // #4: 선택된 식재료명 + 키워드로 공공 레시피 자동 검색 (cookedRecipeApiKey 사용)
     let publicRecipes = [];
-    const apiKey = process.env.FOOD_SAFETY_API_KEY || process.env.OPEN_API_KEY || '';
-    if (apiKey) {
-      // 선택된 식재료(최대 3개) + 직접 입력 키워드를 함께 검색어로 사용
+    const recApiKey = cookedRecipeApiKey || process.env.FOOD_SAFETY_API_KEY || process.env.OPEN_API_KEY || '';
+    if (recApiKey) {
       const searchTerms = [...new Set([...selectedIngredients.slice(0, 3), keyword].filter(Boolean))];
-      const publicMap = new Map(); // 이름 기준 중복 제거
-
+      const publicMap = new Map();
       await Promise.all(searchTerms.map(async (term) => {
         try {
-          const encKeyword = encodeURIComponent(term);
-          const url = `http://openapi.foodsafetykorea.go.kr/api/${apiKey}/COOKRCP01/json/1/20/RCP_NM=${encKeyword}`;
-          const r = await fetch(url, { signal: AbortSignal.timeout(5000) });
-          const d = await r.json();
-          const rows = d?.COOKRCP01?.row || [];
-          rows.forEach(row => {
-            const name = row.RCP_NM || '';
-            if (!name || publicMap.has(name)) return;
-            publicMap.set(name, {
-              id: null, name, calories: Number(row.INFO_ENG) || 0,
-              ingredients: (row.RCP_PARTS_DTLS || '').split(/[,·\n]+/).map(s => ({ name: s.trim(), grams: 0 })).filter(i => i.name),
-              cookingTools: [], steps: [], carbs: 0, protein: 0, fat: 0, sodium: 0, sugar: 0,
-              cookingTime: 30, satisfaction: 3, source: 'public', eatenDates: []
-            });
-          });
+          const enc = encodeURIComponent(term);
+          // https + http fallback으로 공공 API 호출
+          for (const baseUrl of [
+            `https://openapi.foodsafetykorea.go.kr/api/${recApiKey}/COOKRCP01/json/1/20/RCP_NM=${enc}`,
+            `http://openapi.foodsafetykorea.go.kr/api/${recApiKey}/COOKRCP01/json/1/20/RCP_NM=${enc}`
+          ]) {
+            try {
+              const resp = await axios.get(baseUrl, { timeout: 6000 });
+              const rows = resp.data?.COOKRCP01?.row || [];
+              const normalizedRows = Array.isArray(rows) ? rows : [rows];
+              normalizedRows.forEach(row => {
+                const name = row.RCP_NM || '';
+                if (!name || publicMap.has(name)) return;
+                const steps = Array.from({ length: 20 }, (_, i) => {
+                  const k = `MANUAL${String(i + 1).padStart(2, '0')}`;
+                  return row[k]?.trim();
+                }).filter(Boolean);
+                publicMap.set(name, {
+                  id: null, name, source: 'public',
+                  calories: Number(row.INFO_ENG) || 0,
+                  category: row.RCP_PAT2 || '',
+                  cookingMethod: row.RCP_WAY2 || '',
+                  ingredientsText: row.RCP_PARTS_DTLS || '',
+                  ingredients: (row.RCP_PARTS_DTLS || '').split(/[,·\n]+/).map(s => ({ name: s.trim(), grams: 0 })).filter(i => i.name),
+                  cookingTools: [], steps,
+                  carbs: 0, protein: 0, fat: 0, sodium: 0, sugar: 0,
+                  cookingTime: 30, satisfaction: 3, eatenDates: []
+                });
+              });
+              break; // 성공하면 fallback 중단
+            } catch { /* 다음 URL 시도 */ }
+          }
         } catch {}
       }));
-
       publicRecipes = Array.from(publicMap.values());
     }
 
