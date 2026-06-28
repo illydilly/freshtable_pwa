@@ -1668,12 +1668,17 @@ app.patch('/api/ingredients/:id/info', async (req, res, next) => {
 app.get('/api/ingredients/consumed', async (_req, res, next) => {
   try {
     const ingredients = await prisma.ingredient.findMany({
-      include: { purchase: true },
+      include: { purchase: true, usageHistory: true },
       orderBy: { createdAt: 'desc' }
     });
     const consumed = ingredients
       .map(normalizeIngredient)
-      .filter((item) => item.remainingGrams <= 0);
+      .filter((item) => {
+        // purchase.grams 기준으로 SSoT 계산 (normalizeIngredient 버전과 무관하게 안전하게 처리)
+        const total = item.purchase?.grams ?? item.totalGrams ?? 0;
+        const remaining = Math.max(total - (item.usedGrams ?? 0), 0);
+        return remaining <= 0 && total > 0; // total이 0인 항목은 데이터 오류이므로 제외
+      });
     res.json(consumed);
   } catch (error) { next(error); }
 });
