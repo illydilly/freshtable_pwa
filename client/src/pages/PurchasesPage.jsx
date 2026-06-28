@@ -5,6 +5,15 @@ import { PageHeader } from '../components/PageHeader';
 import { Modal } from '../components/Modal';
 import { formatCurrency, formatDate } from '../lib/utils';
 
+// 단위별 표기 헬퍼
+function formatUnitDisplay(grams, unitType) {
+  if (!grams && grams !== 0) return '-';
+  if (unitType === 'ml')  return `${grams}ml`;
+  if (unitType === 'kg')  return `${(grams / 1000).toFixed(2).replace(/\.00$/, '')}kg`;
+  if (unitType === 'count') return `${grams}g`;
+  return `${grams}g`;
+}
+
 async function loadTesseract() {
   if (window.Tesseract) return window.Tesseract;
   await new Promise((res, rej) => {
@@ -328,7 +337,7 @@ export function PurchasesPage() {
                             <div className="font-bold text-slate-900">{p.itemName}</div>
                             <div className="mt-1 text-xs text-slate-400">{formatDate(p.date)} · {p.source}{p.purpose?` · ${p.purpose}`:''}</div>
                           </div>
-                          <div className="text-right mr-2"><div className="font-bold text-slate-900">{formatCurrency(p.price)}</div><div className="text-xs text-slate-500">{p.grams}g</div></div>
+                          <div className="text-right mr-2"><div className="font-bold text-slate-900">{formatCurrency(p.price)}</div><div className="text-xs text-slate-500">{formatUnitDisplay(p.grams, p.unitType)}</div></div>
                           <button onClick={()=>openEdit(p)} className="flex h-9 w-9 items-center justify-center rounded-xl bg-[#EDF7E7] text-sage hover:bg-sage hover:text-white transition-colors flex-shrink-0"><Edit2 size={14}/></button>
                           <button onClick={()=>deletePurchase(p.id)} disabled={deletingId===p.id} className="flex h-9 w-9 items-center justify-center rounded-xl bg-[#FFF0F0] text-coral hover:bg-coral hover:text-white transition-colors flex-shrink-0 disabled:opacity-50"><Trash2 size={14}/></button>
                         </div>
