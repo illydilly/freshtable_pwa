@@ -12,13 +12,28 @@ const today = () => new Date().toISOString().slice(0, 10);
 const emptyPurchase = { itemName: '', price: '', source: '', date: today(), unitType: 'g', ...emptyUnitValue() };
 
 // ── #1 Fix: 단위 포맷 헬퍼 (ml / g 올바르게 표기) ──────────────────────
-function formatUnit(grams, unitType) {
-  if (unitType === 'ml') return `${grams}ml`;
+/**
+ * unitType에 따라 올바른 단위 표기 반환
+ * 'g' → '200g', 'ml' → '500ml', 'kg' → '1.5kg (1500g)', 'count'|'개수' → '10개'
+ */
+function formatUnit(value, unitType) {
+  if (!unitType || unitType === 'g')   return `${value}g`;
+  if (unitType === 'ml')               return `${value}ml`;
   if (unitType === 'kg') {
-    const kg = (grams / 1000).toFixed(2).replace(/\.00$/, '');
-    return `${kg}kg (${grams}g)`;
+    const kg = (value / 1000).toFixed(2).replace(/\.00$/, '');
+    return `${kg}kg (${value}g)`;
   }
-  return `${grams}g`;
+  if (unitType === 'count' || unitType === '개수') return `${value}개`;
+  return `${value}${unitType}`;  // 예상치 못한 단위도 그대로 출력
+}
+
+/** 단위 표기만 반환 (숫자 제외) */
+function getUnitLabel(unitType) {
+  if (!unitType || unitType === 'g')   return 'g';
+  if (unitType === 'ml')               return 'ml';
+  if (unitType === 'kg')               return 'kg';
+  if (unitType === 'count' || unitType === '개수') return '개';
+  return unitType;
 }
 
 // ── 클라이언트에서 항상 purchase.grams 기준으로 계산 (SSoT) ──────────────
@@ -33,7 +48,9 @@ function getClientRemaining(item) {
 }
 function getClientPercent(item) {
   const total = getClientTotal(item);
-  return total > 0 ? Math.round((getClientRemaining(item) / total) * 100) : 0;
+  if (total <= 0) return 0;
+  const raw = Math.round((getClientRemaining(item) / total) * 100);
+  return Math.min(100, Math.max(0, raw)); // 안전장치: 0~100 범위 보장
 }
 
 function ExpiryBadge({ expiryInfo }) {
@@ -148,7 +165,7 @@ export function IngredientsPage() {
     e.stopPropagation();
     const remaining = getClientRemaining(item);
     if (remaining <= 0) return;
-    if (!confirm(`'${item.name}' ${remaining}g를 소진 완료 처리할까요?`)) return;
+    if (!confirm(`'${item.name}' ${formatUnit(remaining, item.purchase?.unitType)}를 소진 완료 처리할까요?`)) return;
     setConsumingId(item.id);
     try {
       await api.post(`/ingredients/${item.id}/usage`, { date: today(), menuName: '소진완료', gramsUsed: remaining, mealType: null });
@@ -428,7 +445,7 @@ export function IngredientsPage() {
                     <div className="flex flex-wrap items-center justify-between gap-3">
                       <div>
                         <div className="text-lg font-bold text-slate-900">{item.name}</div>
-                        <div className="mt-1 text-sm text-slate-500">남은 재고 <strong>{remaining}g</strong></div>
+                        <div className="mt-1 text-sm text-slate-500">남은 재고 <strong>{formatUnit(remaining, item.purchase?.unitType)}</strong></div>
                       </div>
                       <div className="flex items-center gap-2">
                         <button
@@ -454,7 +471,7 @@ export function IngredientsPage() {
                     <div className="mt-4 h-2 overflow-hidden rounded-full bg-slate-100">
                       <div
                         className={`h-full rounded-full ${item.status === '긴급' ? 'bg-coral' : item.status === '빨리 먹기' ? 'bg-[#F1B44C]' : 'bg-sage'}`}
-                        style={{ width: `${Math.max(percent, 4)}%` }}
+                        style={{ width: `${Math.max(Math.min(percent, 100), 4)}%` }}
                       />
                     </div>
                   </button>

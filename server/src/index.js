@@ -12,7 +12,7 @@ import { prisma } from './db.js';
 import { buildDashboard } from './utils/dashboard.js';
 import { normalizeIngredient } from './utils/ingredients.js';
 import { buildWeeklyPurchaseTotals } from './utils/calendar.js';
-import { buildMonthlyKpis, buildPurchaseTrend, buildTopIngredients, buildTopMenus } from './utils/statistics.js';
+import { buildDailyTrend, buildMonthlyKpis, buildPurchaseTrend, buildTopIngredients, buildTopMenus, kstDateKey, kstRangeToUTC, zeroFillDates } from './utils/statistics.js';
 import { buildRecipeRecommendations } from './utils/recommendations.js';
 
 dotenv.config();
@@ -722,6 +722,24 @@ app.get('/api/ingredients', async (req, res, next) => {
 
 
 
+app.get('/api/ingredients/consumed', async (_req, res, next) => {
+  try {
+    const ingredients = await prisma.ingredient.findMany({
+      include: { purchase: true, usageHistory: true },
+      orderBy: { createdAt: 'desc' }
+    });
+    const consumed = ingredients
+      .map(normalizeIngredient)
+      .filter((item) => {
+        // purchase.grams 기준으로 SSoT 계산 (normalizeIngredient 버전과 무관하게 안전하게 처리)
+        const total = item.purchase?.grams ?? item.totalGrams ?? 0;
+        const remaining = Math.max(total - (item.usedGrams ?? 0), 0);
+        return remaining <= 0 && total > 0; // total이 0인 항목은 데이터 오류이므로 제외
+      });
+    res.json(consumed);
+  } catch (error) { next(error); }
+});
+
 app.get('/api/ingredients/:id', async (req, res, next) => {
 
   try {
@@ -1377,6 +1395,14 @@ app.get('/api/statistics/purchase-trend', async (_req, res, next) => {
 
 });
 
+// 최근 N일 일별 지출 (KST + Zero-fill)
+app.get('/api/statistics/daily-trend', async (req, res, next) => {
+  try {
+    const days = Math.min(Number(req.query.days) || 7, 90);
+    res.json(await buildDailyTrend(prisma, new Date(), days));
+  } catch (error) { next(error); }
+});
+
 
 
 app.get('/api/statistics/top-ingredients', async (_req, res, next) => {
@@ -1665,24 +1691,6 @@ app.patch('/api/ingredients/:id/info', async (req, res, next) => {
 // ════════════════════════════════════════════════════════════════════
 // remainingGrams(=purchase.grams - usedGrams)가 0 이하인 Ingredient만 반환.
 // 인벤토리 메인 목록에서는 자동 숨김 처리되는 항목들이 여기 노출됨.
-app.get('/api/ingredients/consumed', async (_req, res, next) => {
-  try {
-    const ingredients = await prisma.ingredient.findMany({
-      include: { purchase: true, usageHistory: true },
-      orderBy: { createdAt: 'desc' }
-    });
-    const consumed = ingredients
-      .map(normalizeIngredient)
-      .filter((item) => {
-        // purchase.grams 기준으로 SSoT 계산 (normalizeIngredient 버전과 무관하게 안전하게 처리)
-        const total = item.purchase?.grams ?? item.totalGrams ?? 0;
-        const remaining = Math.max(total - (item.usedGrams ?? 0), 0);
-        return remaining <= 0 && total > 0; // total이 0인 항목은 데이터 오류이므로 제외
-      });
-    res.json(consumed);
-  } catch (error) { next(error); }
-});
-
 // ════════════════════════════════════════════════════════════════════
 // 기능 1: 재구매(재등록) — 소진된 식재료의 기존 정보를 복사해 새 배치 생성
 // ════════════════════════════════════════════════════════════════════
@@ -1881,20 +1889,24 @@ app.post('/api/recommendations/by-ingredients', async (req, res, next) => {
 app.get('/api/statistics/period', async (req, res, next) => {
   try {
     const { from, to } = req.query;
-    const fromDate = from ? new Date(from) : new Date(Date.now() - 30 * 86400000);
-    const toDate   = to   ? new Date(to)   : new Date();
-    toDate.setHours(23, 59, 59, 999);
+    // #핵심수정: KST 달력 날짜 문자열을 정확한 UTC 범위로 환산 (서버 TZ 설정과 무관)
+    const { fromUTC: fromDate, toUTC: toDate } = kstRangeToUTC(from, to);
 
     const [purchases, diaries] = await Promise.all([
       prisma.purchase.findMany({ where: { date: { gte: fromDate, lte: toDate } }, orderBy: { date: 'asc' } }),
       prisma.mealDiary.findMany({ where: { date: { gte: fromDate, lte: toDate } }, include: { recipe: true }, orderBy: { date: 'asc' } })
     ]);
 
-    const dailySpend = {};
+    // KST 기준으로 일별 집계 (UTC 서버 → +9h 보정)
+    const dailySpendMap = {};
     purchases.forEach(p => {
-      const key = p.date.toISOString().slice(0, 10);
-      dailySpend[key] = (dailySpend[key] || 0) + p.price;
+      const key = kstDateKey(p.date); // UTC → KST 날짜 변환 (서버 TZ 설정과 무관, getTime() 기반)
+      dailySpendMap[key] = (dailySpendMap[key] || 0) + p.price;
     });
+
+    // Zero-filling: 지출 없는 날도 amount:0 으로 채움
+    const rawDailySpend = Object.entries(dailySpendMap).map(([date, amount]) => ({ date, amount }));
+    const filledDailySpend = zeroFillDates(rawDailySpend, fromDate, toDate);
 
     res.json({
       purchases,
@@ -1903,7 +1915,7 @@ app.get('/api/statistics/period', async (req, res, next) => {
         recipeName: d.recipe?.name || d.diaryText || '',
         calories: d.recipe?.calories || 0
       })),
-      dailySpend: Object.entries(dailySpend).map(([date, amount]) => ({ date, amount })),
+      dailySpend: filledDailySpend,
       summary: {
         totalSpend: purchases.reduce((s, p) => s + p.price, 0),
         totalCalories: diaries.reduce((s, d) => s + (d.recipe?.calories || 0), 0),
