@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { ChefHat, Clock3, Edit2, Plus, Search, Star, Wrench, X } from 'lucide-react';
 import { NutritionAutoCalc } from '../components/NutritionAutoCalc';
+import { IngredientAutocomplete } from '../components/IngredientAutocomplete';
 import { useSearchParams } from 'react-router-dom';
 import { Cell, Pie, PieChart, ResponsiveContainer } from 'recharts';
 import { api } from '../lib/api';
@@ -29,7 +30,7 @@ export function RecipesPage() {
   // #12: 레시피 추가 모달
   const [addModal, setAddModal] = useState(false);
   const [addForm, setAddForm] = useState(emptyForm);
-  const [addIngredients, setAddIngredients] = useState([{ name:'', grams:'' }]);
+  const [addIngredients, setAddIngredients] = useState([{ name:'', grams:'', unitType:'g', unitAmount:'' }]);
   const [addSteps, setAddSteps] = useState(['']);
   const [addTools, setAddTools] = useState([]);
   const [saving, setSaving] = useState(false);
@@ -95,7 +96,7 @@ export function RecipesPage() {
 
   // #12: 레시피 저장
   const openAddModal = () => {
-    setAddForm(emptyForm); setAddIngredients([{name:'',grams:''}]); setAddSteps(['']); setAddTools([]); setSaveError(''); setAddModal(true);
+    setAddForm(emptyForm); setAddIngredients([{name:'',grams:'',unitType:'g',unitAmount:''}]); setAddSteps(['']); setAddTools([]); setSaveError(''); setAddModal(true);
   };
 
   const submitAdd = async () => {
@@ -139,7 +140,10 @@ export function RecipesPage() {
       _id: r.id
     });
     setEditIngredients(
-      (r.ingredients || []).map(i => typeof i === 'string' ? { name: i, grams: '' } : { name: i.name || '', grams: i.grams || '' })
+      (r.ingredients || []).map(i => typeof i === 'string'
+        ? { name: i, grams: '', unitType: 'g', unitAmount: '' }
+        : { name: i.name || '', grams: i.grams || '', unitType: i.unitType || 'g', unitAmount: i.unitAmount || '' }
+      )
     );
     setEditSteps(r.steps?.length ? r.steps : ['']);
     setEditTools(r.cookingTools || []);
@@ -319,7 +323,7 @@ export function RecipesPage() {
 
       {/* #8: 레시피 수정 모달 */}
       <Modal open={editModal} onClose={()=>setEditModal(false)} title="레시피 수정" className="max-w-2xl">
-        <div className="space-y-5 max-h-[75vh] overflow-y-auto pr-1">
+        <div className="space-y-5">
           {editError && <div className="rounded-xl bg-red-50 border border-red-200 px-4 py-3 text-sm text-red-700">{editError}</div>}
 
           {/* 사진 */}
@@ -358,19 +362,43 @@ export function RecipesPage() {
             <div><label className="mb-1 block text-xs font-bold text-slate-500">당류(g)</label><input type="number" step="0.01" className="input-base" value={editForm.sugar||0} onChange={e=>setEditForm(p=>({...p,sugar:e.target.value}))}/></div>
           </div>
 
-          {/* 재료 행 */}
+          {/* 재료 행 — #2: 자동완성 + 단위선택 / 재료 목록은 독립 스크롤(최대 5줄 높이) */}
           <div>
             <div className="mb-2 flex items-center justify-between">
               <label className="text-sm font-bold text-slate-700">사용 재료</label>
-              <button type="button" onClick={()=>setEditIngredients(p=>[...p,{name:'',grams:''}])} className="rounded-lg bg-[#EDF7E7] px-2.5 py-1 text-xs font-semibold text-sage">+ 재료 추가</button>
+              <button type="button" onClick={()=>setEditIngredients(p=>[...p,{name:'',grams:'',unitType:'g',unitAmount:''}])} className="rounded-lg bg-[#EDF7E7] px-2.5 py-1 text-xs font-semibold text-sage">+ 재료 추가</button>
             </div>
-            {editIngredients.map((ing,i)=>(
-              <div key={i} className="mb-2 flex gap-2 items-center">
-                <input className="input-base flex-1 text-sm" placeholder="재료명" value={ing.name} onChange={e=>setEditIngredients(p=>p.map((x,idx)=>idx===i?{...x,name:e.target.value}:x))}/>
-                <input className="input-base w-20 text-sm" placeholder="g" type="number" value={ing.grams} onChange={e=>setEditIngredients(p=>p.map((x,idx)=>idx===i?{...x,grams:e.target.value}:x))}/>
-                {editIngredients.length>1 && <button type="button" onClick={()=>setEditIngredients(p=>p.filter((_,idx)=>idx!==i))} className="flex h-9 w-9 items-center justify-center rounded-xl bg-[#FFF0F0] text-coral"><X size={13}/></button>}
-              </div>
-            ))}
+            <div className="max-h-52 space-y-2 overflow-y-auto rounded-2xl border border-border bg-[#FCFCFC] p-2.5">
+              {editIngredients.map((ing,i)=>(
+                <div key={i} className="space-y-1.5 rounded-xl bg-white p-2 border border-border/60">
+                  <div className="flex gap-2 items-center">
+                    {/* #2: 기존 식재료 자동완성 — 선택 시 이름+단위 자동 채움 */}
+                    <IngredientAutocomplete
+                      value={ing.name}
+                      onChange={(name)=>setEditIngredients(p=>p.map((x,idx)=>idx===i?{...x,name}:x))}
+                      onSelect={(item)=>setEditIngredients(p=>p.map((x,idx)=>idx===i?{
+                        ...x, name:item.name, unitType:item.unitType||'g',
+                        unitAmount: item.unitType==='count' ? String(item.unitAmount||'') : '',
+                      }:x))}
+                    />
+                    <select className="input-base w-16 text-xs px-1" value={ing.unitType||'g'}
+                      onChange={e=>setEditIngredients(p=>p.map((x,idx)=>idx===i?{...x,unitType:e.target.value,grams:'',unitAmount:''}:x))}>
+                      <option value="g">g</option><option value="ml">ml</option>
+                      <option value="kg">kg</option><option value="count">개</option>
+                    </select>
+                    {editIngredients.length>1 && <button type="button" onClick={()=>setEditIngredients(p=>p.filter((_,idx)=>idx!==i))} className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-[#FFF0F0] text-coral"><X size={13}/></button>}
+                  </div>
+                  {ing.unitType==='count' ? (
+                    <div className="flex gap-2 pl-1">
+                      <input className="input-base text-sm flex-1" type="number" min="0.01" step="1" placeholder="개수" value={ing.grams} onChange={e=>setEditIngredients(p=>p.map((x,idx)=>idx===i?{...x,grams:e.target.value}:x))}/>
+                      <input className="input-base text-sm flex-1" type="number" min="0.01" step="0.1" placeholder="개당(g)" value={ing.unitAmount} onChange={e=>setEditIngredients(p=>p.map((x,idx)=>idx===i?{...x,unitAmount:e.target.value}:x))}/>
+                    </div>
+                  ) : (
+                    <input className="input-base text-sm w-full" type="number" min="0.01" step="0.01" placeholder={ing.unitType==='ml'?'ml':ing.unitType==='kg'?'kg':'g'} value={ing.grams} onChange={e=>setEditIngredients(p=>p.map((x,idx)=>idx===i?{...x,grams:e.target.value}:x))}/>
+                  )}
+                </div>
+              ))}
+            </div>
           </div>
 
           {/* ✨ 영양정보 자동 계산 (EDIT) */}
@@ -402,22 +430,27 @@ export function RecipesPage() {
             ))}
           </div>
 
-          {/* 조리 순서 행 */}
+          {/* #1: 조리 순서 — 독립 스크롤 영역 (최대 4단계 높이) */}
           <div>
             <div className="mb-2 flex items-center justify-between">
               <label className="text-sm font-bold text-slate-700">조리 순서</label>
               <button type="button" onClick={()=>setEditSteps(p=>[...p,''])} className="rounded-lg bg-slate-100 px-2.5 py-1 text-xs font-semibold text-slate-600">+ 단계 추가</button>
             </div>
-            {editSteps.map((step,i)=>(
-              <div key={i} className="mb-2 flex gap-2 items-center">
-                <span className="flex h-7 w-7 flex-shrink-0 items-center justify-center rounded-full bg-[#EDF7E7] text-xs font-bold text-sage">{i+1}</span>
-                <input className="input-base flex-1 text-sm" placeholder={`${i+1}번째 단계`} value={step} onChange={e=>setEditSteps(p=>p.map((x,idx)=>idx===i?e.target.value:x))}/>
-                {editSteps.length>1 && <button type="button" onClick={()=>setEditSteps(p=>p.filter((_,idx)=>idx!==i))} className="flex h-9 w-9 items-center justify-center rounded-xl bg-[#FFF0F0] text-coral"><X size={13}/></button>}
-              </div>
-            ))}
+            <div className="max-h-48 space-y-2 overflow-y-auto rounded-2xl border border-border bg-[#FCFCFC] p-2.5">
+              {editSteps.map((step,i)=>(
+                <div key={i} className="flex gap-2 items-center">
+                  <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-[#EDF7E7] text-xs font-bold text-sage">{i+1}</span>
+                  <input className="input-base flex-1 text-sm" placeholder={`${i+1}번째 단계`} value={step} onChange={e=>setEditSteps(p=>p.map((x,idx)=>idx===i?e.target.value:x))}/>
+                  {editSteps.length>1 && <button type="button" onClick={()=>setEditSteps(p=>p.filter((_,idx)=>idx!==i))} className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-[#FFF0F0] text-coral"><X size={13}/></button>}
+                </div>
+              ))}
+            </div>
           </div>
+        </div>
 
-          <div className="flex gap-3 pt-2">
+        {/* #1: 저장 버튼 sticky — 내용이 아무리 길어도 항상 모달 하단에 고정 */}
+        <div className="shrink-0 border-t border-border bg-white px-6 py-4">
+          <div className="flex gap-3">
             <button type="button" onClick={()=>setEditModal(false)} className="flex-1 rounded-2xl border border-border px-5 py-3 font-semibold text-slate-500">취소</button>
             <button type="button" onClick={submitEditRecipe} disabled={savingEdit} className="flex-1 rounded-2xl bg-sage px-5 py-3 font-semibold text-white disabled:opacity-60">{savingEdit?'저장 중...':'수정 저장'}</button>
           </div>
@@ -426,7 +459,7 @@ export function RecipesPage() {
 
       {/* #12, #13: 레시피 추가 모달 */}
       <Modal open={addModal} onClose={()=>setAddModal(false)} title="레시피 추가" className="max-w-2xl">
-        <div className="space-y-5 max-h-[75vh] overflow-y-auto pr-1">
+        <div className="space-y-5">
           {saveError && <div className="rounded-xl bg-red-50 border border-red-200 px-4 py-3 text-sm text-red-700">{saveError}</div>}
           <div><label className="mb-1 block text-xs font-bold text-slate-500">레시피 이름 *</label><input className="input-base" value={addForm.name} onChange={e=>setAddForm(p=>({...p,name:e.target.value}))}/></div>
           <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
@@ -440,19 +473,42 @@ export function RecipesPage() {
             <div><label className="mb-1 block text-xs font-bold text-slate-500">당류(g)</label><input type="number" step="0.01" className="input-base" value={addForm.sugar} onChange={e=>setAddForm(p=>({...p,sugar:e.target.value}))}/></div>
           </div>
 
-          {/* #13: 사용 재료 행 */}
+          {/* #13, #2: 사용 재료 행 — 자동완성 + 단위선택 / 독립 스크롤 */}
           <div>
             <div className="mb-2 flex items-center justify-between">
               <label className="text-sm font-bold text-slate-700">사용 재료</label>
-              <button type="button" onClick={()=>setAddIngredients(p=>[...p,{name:'',grams:''}])} className="rounded-lg bg-[#EDF7E7] px-2.5 py-1 text-xs font-semibold text-sage">+ 재료 추가</button>
+              <button type="button" onClick={()=>setAddIngredients(p=>[...p,{name:'',grams:'',unitType:'g',unitAmount:''}])} className="rounded-lg bg-[#EDF7E7] px-2.5 py-1 text-xs font-semibold text-sage">+ 재료 추가</button>
             </div>
-            {addIngredients.map((ing,i)=>(
-              <div key={i} className="mb-2 flex gap-2 items-center">
-                <input className="input-base flex-1 text-sm" placeholder="재료명" value={ing.name} onChange={e=>setAddIngredients(p=>p.map((x,idx)=>idx===i?{...x,name:e.target.value}:x))}/>
-                <input className="input-base w-20 text-sm" placeholder="g" type="number" value={ing.grams} onChange={e=>setAddIngredients(p=>p.map((x,idx)=>idx===i?{...x,grams:e.target.value}:x))}/>
-                {addIngredients.length>1&&<button type="button" onClick={()=>setAddIngredients(p=>p.filter((_,idx)=>idx!==i))} className="flex h-9 w-9 items-center justify-center rounded-xl bg-[#FFF0F0] text-coral"><X size={13}/></button>}
-              </div>
-            ))}
+            <div className="max-h-52 space-y-2 overflow-y-auto rounded-2xl border border-border bg-[#FCFCFC] p-2.5">
+              {addIngredients.map((ing,i)=>(
+                <div key={i} className="space-y-1.5 rounded-xl bg-white p-2 border border-border/60">
+                  <div className="flex gap-2 items-center">
+                    <IngredientAutocomplete
+                      value={ing.name}
+                      onChange={(name)=>setAddIngredients(p=>p.map((x,idx)=>idx===i?{...x,name}:x))}
+                      onSelect={(item)=>setAddIngredients(p=>p.map((x,idx)=>idx===i?{
+                        ...x, name:item.name, unitType:item.unitType||'g',
+                        unitAmount: item.unitType==='count' ? String(item.unitAmount||'') : '',
+                      }:x))}
+                    />
+                    <select className="input-base w-16 text-xs px-1" value={ing.unitType||'g'}
+                      onChange={e=>setAddIngredients(p=>p.map((x,idx)=>idx===i?{...x,unitType:e.target.value,grams:'',unitAmount:''}:x))}>
+                      <option value="g">g</option><option value="ml">ml</option>
+                      <option value="kg">kg</option><option value="count">개</option>
+                    </select>
+                    {addIngredients.length>1&&<button type="button" onClick={()=>setAddIngredients(p=>p.filter((_,idx)=>idx!==i))} className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-[#FFF0F0] text-coral"><X size={13}/></button>}
+                  </div>
+                  {ing.unitType==='count' ? (
+                    <div className="flex gap-2 pl-1">
+                      <input className="input-base text-sm flex-1" type="number" min="0.01" step="1" placeholder="개수" value={ing.grams} onChange={e=>setAddIngredients(p=>p.map((x,idx)=>idx===i?{...x,grams:e.target.value}:x))}/>
+                      <input className="input-base text-sm flex-1" type="number" min="0.01" step="0.1" placeholder="개당(g)" value={ing.unitAmount} onChange={e=>setAddIngredients(p=>p.map((x,idx)=>idx===i?{...x,unitAmount:e.target.value}:x))}/>
+                    </div>
+                  ) : (
+                    <input className="input-base text-sm w-full" type="number" min="0.01" step="0.01" placeholder={ing.unitType==='ml'?'ml':ing.unitType==='kg'?'kg':'g'} value={ing.grams} onChange={e=>setAddIngredients(p=>p.map((x,idx)=>idx===i?{...x,grams:e.target.value}:x))}/>
+                  )}
+                </div>
+              ))}
+            </div>
           </div>
 
           {/* ✨ 영양정보 자동 계산 (ADD) */}
@@ -487,22 +543,27 @@ export function RecipesPage() {
             ))}
           </div>
 
-          {/* #13: 조리 순서 행 */}
+          {/* #1, #13: 조리 순서 — 독립 스크롤 영역 */}
           <div>
             <div className="mb-2 flex items-center justify-between">
               <label className="text-sm font-bold text-slate-700">조리 순서</label>
               <button type="button" onClick={()=>setAddSteps(p=>[...p,''])} className="rounded-lg bg-slate-100 px-2.5 py-1 text-xs font-semibold text-slate-600">+ 단계 추가</button>
             </div>
-            {addSteps.map((step,i)=>(
-              <div key={i} className="mb-2 flex gap-2 items-center">
-                <span className="flex h-7 w-7 flex-shrink-0 items-center justify-center rounded-full bg-[#EDF7E7] text-xs font-bold text-sage">{i+1}</span>
-                <input className="input-base flex-1 text-sm" placeholder={`${i+1}번째 조리 단계`} value={step} onChange={e=>setAddSteps(p=>p.map((x,idx)=>idx===i?e.target.value:x))}/>
-                {addSteps.length>1&&<button type="button" onClick={()=>setAddSteps(p=>p.filter((_,idx)=>idx!==i))} className="flex h-9 w-9 items-center justify-center rounded-xl bg-[#FFF0F0] text-coral"><X size={13}/></button>}
-              </div>
-            ))}
+            <div className="max-h-48 space-y-2 overflow-y-auto rounded-2xl border border-border bg-[#FCFCFC] p-2.5">
+              {addSteps.map((step,i)=>(
+                <div key={i} className="flex gap-2 items-center">
+                  <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-[#EDF7E7] text-xs font-bold text-sage">{i+1}</span>
+                  <input className="input-base flex-1 text-sm" placeholder={`${i+1}번째 조리 단계`} value={step} onChange={e=>setAddSteps(p=>p.map((x,idx)=>idx===i?e.target.value:x))}/>
+                  {addSteps.length>1&&<button type="button" onClick={()=>setAddSteps(p=>p.filter((_,idx)=>idx!==i))} className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-[#FFF0F0] text-coral"><X size={13}/></button>}
+                </div>
+              ))}
+            </div>
           </div>
+        </div>
 
-          <div className="flex gap-3 pt-2">
+        {/* #1: 저장 버튼 sticky — 내용이 아무리 길어도 항상 모달 하단에 고정 */}
+        <div className="shrink-0 border-t border-border bg-white px-6 py-4">
+          <div className="flex gap-3">
             <button type="button" onClick={()=>setAddModal(false)} className="flex-1 rounded-2xl border border-border px-5 py-3 font-semibold text-slate-500">취소</button>
             <button type="button" onClick={submitAdd} disabled={saving} className="flex-1 rounded-2xl bg-sage px-5 py-3 font-semibold text-white disabled:opacity-60">{saving?'저장 중...':'레시피 저장'}</button>
           </div>

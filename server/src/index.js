@@ -740,6 +740,64 @@ app.get('/api/ingredients/consumed', async (_req, res, next) => {
   } catch (error) { next(error); }
 });
 
+
+// ════════════════════════════════════════════════════════════════════
+// 식재료명 자동완성 검색 — Ingredient(단위정보) + NutritionInfo(영양정보) 병합
+// ════════════════════════════════════════════════════════════════════
+// /:id 라우트보다 반드시 먼저 선언해야 함 (Express는 'search' 문자열을
+// :id 파라미터로 먼저 매칭해버리는 라우팅 순서 버그가 있었음 — consumed와 동일 이슈)
+app.get('/api/ingredients/search', async (req, res, next) => {
+  try {
+    const q = (req.query.q || '').toString().trim();
+    if (!q) return res.json([]);
+
+    const [ingredientMatches, nutritionMatches] = await Promise.all([
+      prisma.ingredient.findMany({
+        where: { name: { contains: q, mode: 'insensitive' } },
+        include: { purchase: true },
+        orderBy: { createdAt: 'desc' },
+        take: 50,
+      }),
+      prisma.nutritionInfo.findMany({
+        where: { name: { contains: q, mode: 'insensitive' } },
+        take: 50,
+      }),
+    ]);
+
+    const merged = new Map();
+
+    ingredientMatches.forEach((ing) => {
+      if (merged.has(ing.name)) return;
+      merged.set(ing.name, {
+        name: ing.name,
+        unitType: ing.purchase?.unitType || 'g',
+        unitAmount: ing.purchase?.unitAmount ?? null,
+        calories: null, carbs: null, protein: null, fat: null, sodium: null, sugar: null,
+      });
+    });
+
+    nutritionMatches.forEach((n) => {
+      const existing = merged.get(n.name);
+      if (existing) {
+        existing.calories = n.calories; existing.carbs = n.carbs; existing.protein = n.protein;
+        existing.fat = n.fat; existing.sodium = n.sodium; existing.sugar = n.sugar;
+      } else {
+        merged.set(n.name, {
+          name: n.name, unitType: 'g', unitAmount: null,
+          calories: n.calories, carbs: n.carbs, protein: n.protein,
+          fat: n.fat, sodium: n.sodium, sugar: n.sugar,
+        });
+      }
+    });
+
+    const results = Array.from(merged.values())
+      .sort((a, b) => a.name.localeCompare(b.name, 'ko'))
+      .slice(0, 10);
+
+    res.json(results);
+  } catch (error) { next(error); }
+});
+
 app.get('/api/ingredients/:id', async (req, res, next) => {
 
   try {
